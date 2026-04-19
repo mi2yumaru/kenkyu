@@ -75,7 +75,7 @@ public:
 	// Get the strings that parameterize the MatchString tasks
 	vector<cString> GetMatchStrings(); 
 	cString GetMatchString(int x);
-	int GetNumberOfMatchStrings() { return m_strings.size(); } 
+	int GetNumberOfMatchStrings() { return static_cast<int>(m_strings.size()); } 
 
 private: 
 	// Store the strings used by the MatchString tasks

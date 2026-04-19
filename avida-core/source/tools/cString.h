@@ -154,7 +154,7 @@ public:
   cString& operator=(const char* in)
   {
     assert( in != NULL ); // NULL input string
-    value = Apto::SmartPtr<cStringData, Apto::InternalRCObject>(new cStringData(strlen(in),in));
+    value = Apto::SmartPtr<cStringData, Apto::InternalRCObject>(new cStringData(static_cast<int>(strlen(in)),in));
     assert(value);  // Memory Allocation Error: Out of Memory
     return *this;
   }
@@ -183,7 +183,7 @@ public:
 
   // Concatenation
   cString & operator+= (const char in)  { return AppendStr(1,&in); }
-  cString & operator+= (const char * in){ return AppendStr(strlen(in),in); }
+  cString & operator+= (const char * in){ return AppendStr(static_cast<int>(strlen(in)),in); }
   cString & operator+= (const cString & in){return AppendStr(in.GetSize(),in);}
   cString operator+ (const char in_char){ return (cString(*this) += in_char); }
   cString operator+ (const char * in)   { return (cString(*this) += in); }
@@ -195,7 +195,7 @@ public:
   cString& Set(const char* fmt, va_list args);
 
   cString& Insert(const char in, int pos = 0, int excise = 0) { return InsertStr(1, &in, pos, excise); }
-  cString& Insert(const char* in, int pos = 0, int excise = 0) { return InsertStr(strlen(in), in, pos, excise); }
+  cString& Insert(const char* in, int pos = 0, int excise = 0) { return InsertStr(static_cast<int>(strlen(in)), in, pos, excise); }
   cString& Insert(const cString& in, int pos = 0, int excise = 0) { return InsertStr(in.GetSize(), in, pos, excise); }
 
 
@@ -495,8 +495,8 @@ public:
    * @return The first occurence after pos, or -1 if not found
    **/
   int Find(const char * in, int pos=0) const{
-    return FindStr(in, strlen(in), pos); }
-  
+    return FindStr(in, static_cast<int>(strlen(in)), pos); }
+
   /**
    * Search for a substring.
    *

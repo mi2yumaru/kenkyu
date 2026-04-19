@@ -41,7 +41,7 @@ public:
     
 	Genome& GetLatest() { assert(m_germline.size() > 0); return m_germline.back(); }
 	void Add(const Genome& genome) { m_germline.push_back(genome); }
-	unsigned int Size() const { return m_germline.size(); }
+	unsigned int Size() const { return static_cast<unsigned int>(m_germline.size()); }
 };
 
 #endif

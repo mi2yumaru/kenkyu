@@ -3297,7 +3297,7 @@ public:
 		std::set_intersection(unique.begin(), unique.end(), _rewarded.begin(), _rewarded.end(), 
 													std::insert_iterator<opinion_set>(intersection, intersection.begin()));
 		
-		return intersection.size() + ocount + 1;
+		return static_cast<double>(intersection.size()) + ocount + 1;
 	}
 	
 private:
@@ -3334,7 +3334,7 @@ public:
 	 */
   virtual double Fitness(cDeme& deme, cAvidaContext&) { 
 		
-		float val = 0.0;
+		double val = 0.0;
 		double performed_t1=0.0;
 		double performed_t2=0.0;
 		for(int i=0; i<deme.GetSize(); ++i) {
@@ -5375,12 +5375,12 @@ public:
     struct HasAny {
       cPopulation& pop;
       HasAny(cPopulation& pop) : pop(pop) {}
-      bool operator()(const int d){ return not pop.GetDeme(d).IsEmpty(); }
+      bool operator()(const int d){ return !pop.GetDeme(d).IsEmpty(); }
     };
-    const int num_eligible = std::count_if(
+    const int num_eligible = static_cast<int>(std::count_if(
       std::begin(deme_indices), std::end(deme_indices),
       HasAny(pop)
-    );
+    ));
     const int binomial_draw = ctx.GetRandom().GetRandBinomial(
       num_eligible,
       m_killprob
@@ -6143,7 +6143,7 @@ class cActionSetRedundancy : public cAction
 {
 private:
 	cString m_inst_name;
-	double m_redundancy;
+	int m_redundancy;
 public:
 	cActionSetRedundancy(cWorld* world, const cString& args, Feedback&) : cAction(world, args)
 	{

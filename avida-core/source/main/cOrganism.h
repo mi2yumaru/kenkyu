@@ -547,7 +547,7 @@ public:
   // increment reputation
   void IncReputation() { SetReputation(GetReputation() + 1); }
   // get number of donors
-  int GetNumberOfDonors() { return donor_list.size(); }
+  int GetNumberOfDonors() { return static_cast<int>(donor_list.size()); }
   // organism donated
   void Donated(){m_num_donate++;}
   // get number of donations
@@ -583,7 +583,7 @@ public:
   // Clear the output buffer
   void SetOutputNegative1();
   void AddDonatedLineage(int lin) { donating_lineages.insert(lin); }
-  int GetNumberOfDonatedLineages() { return donating_lineages.size(); }
+  int GetNumberOfDonatedLineages() { return static_cast<int>(donating_lineages.size()); }
   void InitStringMap(); 
   bool ProduceString(int i);  
   int GetNumberStringsProduced(int i) { return m_string_map ? (*m_string_map)[i].prod_string : 0; }
