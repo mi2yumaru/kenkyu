@@ -1,0 +1,8 @@
+{
+  "cmake.configureArgs": [
+    "-DAVD_GUI_NCURSES=OFF",
+    "-DAVD_CMDLINE=ON",
+    "-DAVD_UNIT_TESTS=OFF",
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+  ]
+}
