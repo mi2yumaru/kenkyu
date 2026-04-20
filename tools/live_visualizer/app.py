@@ -55,6 +55,15 @@ if "is_running" not in st.session_state:
     }
     st.session_state.update_count = 0
     st.session_state.error_message = None
+    # デバッグ情報
+    st.session_state.debug_info = {
+        "process_started": False,
+        "last_10_lines": deque(maxlen=10),
+        "parse_success_count": 0,
+        "parse_fail_count": 0,
+        "last_parsed_data": None,
+        "last_raw_line": None,
+    }
 
 
 # ========================================
@@ -64,7 +73,7 @@ def parse_avida_line(line: str) -> Optional[Dict]:
     """
     Avida 出力行をパースする
     
-    期待される形式: "  0  0    0.0    1"  (UD Gen Fit Orgs)
+    期待される形式: "UD: 752   Gen: 57.83987   Fit: 0.2486994   Orgs: 3597"
     
     Args:
         line: Avida の出力行
@@ -73,20 +82,19 @@ def parse_avida_line(line: str) -> Optional[Dict]:
         {'UD': int, 'Gen': int, 'Fit': float, 'Orgs': int} または None
     """
     try:
-        # 連続する空白で分割（複数の空白に対応）
-        parts = line.strip().split()
+        # 正規表現でパース
+        pattern = r'UD:\s*(\d+)\s+Gen:\s*([\d.]+)\s+Fit:\s*([\d.]+)\s+Orgs:\s*(\d+)'
+        match = re.search(pattern, line.strip())
         
-        # 4つ以上のフィールドが必要
-        if len(parts) < 4:
+        if match:
+            return {
+                "UD": int(match.group(1)),
+                "Gen": int(float(match.group(2))),  # Gen は整数に変換
+                "Fit": float(match.group(3)),
+                "Orgs": int(match.group(4)),
+            }
+        else:
             return None
-        
-        # 数値に変換を試みる
-        return {
-            "UD": int(parts[0]),
-            "Gen": int(parts[1]),
-            "Fit": float(parts[2]),
-            "Orgs": int(parts[3]),
-        }
     except (ValueError, IndexError, AttributeError):
         return None
 
@@ -110,6 +118,9 @@ def run_avida_simulation():
             bufsize=1,  # 行バッファリング
         )
         
+        # プロセス起動成功をマーク
+        st.session_state.debug_info["process_started"] = True
+        
         # 標準出力を行ごとに読み取る
         for line in process.stdout:
             # 停止フラグをチェック
@@ -121,11 +132,21 @@ def run_avida_simulation():
             if not line:
                 continue
             
+            # デバッグ: 直近10行を保持
+            st.session_state.debug_info["last_10_lines"].append(line)
+            st.session_state.debug_info["last_raw_line"] = line
+            
             # Avida 出力をパース
             data = parse_avida_line(line)
             if data:
+                # パース成功
+                st.session_state.debug_info["parse_success_count"] += 1
+                st.session_state.debug_info["last_parsed_data"] = data
                 # データをキューに追加（メインスレッドで処理）
                 st.session_state.data_queue.put(data)
+            else:
+                # パース失敗
+                st.session_state.debug_info["parse_fail_count"] += 1
         
         # プロセス終了を待つ
         process.wait()
@@ -190,6 +211,15 @@ with col_start:
             }
             st.session_state.update_count = 0
             st.session_state.error_message = None
+            # デバッグ情報リセット
+            st.session_state.debug_info = {
+                "process_started": False,
+                "last_10_lines": deque(maxlen=10),
+                "parse_success_count": 0,
+                "parse_fail_count": 0,
+                "last_parsed_data": None,
+                "last_raw_line": None,
+            }
             # キューをクリア
             while not st.session_state.data_queue.empty():
                 st.session_state.data_queue.get()
@@ -231,7 +261,7 @@ if st.session_state.error_message:
 # ========================================
 # UI: 統計情報
 # ========================================
-if st.session_state.update_count > 0:
+if st.session_state.update_count > 0 or st.session_state.debug_info["parse_success_count"] > 0:
     st.divider()
     st.subheader("📊 Current Statistics")
     
@@ -266,6 +296,37 @@ if st.session_state.update_count > 0:
             "Latest Orgs",
             st.session_state.latest_data["Orgs"],
         )
+    
+    # ========================================
+    # デバッグ情報表示
+    # ========================================
+    st.divider()
+    st.subheader("🐛 Debug Information")
+    
+    debug_col1, debug_col2, debug_col3 = st.columns(3)
+    
+    with debug_col1:
+        st.metric("Process Started", "Yes" if st.session_state.debug_info["process_started"] else "No")
+        st.metric("Parse Success", st.session_state.debug_info["parse_success_count"])
+        st.metric("Parse Fail", st.session_state.debug_info["parse_fail_count"])
+    
+    with debug_col2:
+        st.write("**Last 10 Raw Lines:**")
+        for i, line in enumerate(st.session_state.debug_info["last_10_lines"]):
+            st.code(f"{i+1}: {line}", language=None)
+    
+    with debug_col3:
+        st.write("**Last Parsed Data:**")
+        if st.session_state.debug_info["last_parsed_data"]:
+            st.json(st.session_state.debug_info["last_parsed_data"])
+        else:
+            st.write("None")
+        
+        st.write("**Last Raw Line:**")
+        if st.session_state.debug_info["last_raw_line"]:
+            st.code(st.session_state.debug_info["last_raw_line"], language=None)
+        else:
+            st.write("None")
     
     # ========================================
     # グラフ表示
@@ -343,6 +404,25 @@ else:
     st.info(
         "👈 Click **'Start Simulation'** button to begin collecting data and display graphs."
     )
+    
+    # デバッグ情報表示（データがなくても）
+    if st.session_state.debug_info["parse_success_count"] > 0 or st.session_state.debug_info["parse_fail_count"] > 0:
+        st.divider()
+        st.subheader("🐛 Debug Information (No Graph Data Yet)")
+        
+        debug_col1, debug_col2 = st.columns(2)
+        
+        with debug_col1:
+            st.metric("Process Started", "Yes" if st.session_state.debug_info["process_started"] else "No")
+            st.metric("Parse Success", st.session_state.debug_info["parse_success_count"])
+            st.metric("Parse Fail", st.session_state.debug_info["parse_fail_count"])
+        
+        with debug_col2:
+            st.write("**Last Raw Line:**")
+            if st.session_state.debug_info["last_raw_line"]:
+                st.code(st.session_state.debug_info["last_raw_line"], language=None)
+            else:
+                st.write("None")
 
 # ========================================
 # サイドバー：情報
