@@ -106,9 +106,9 @@ defined(__sparc__)
 #  endif
 # else
 #  if APTO_PLATFORM(MSVC)
-#   define LIB_EXPORT __declspec(dllexport)
+#   define LIB_EXPORT
 #  elif APTO_PLATFORM(GNUC)
-#   define LIB_EXPORT __attribute__((dllimport))
+#   define LIB_EXPORT
 #  else
 #   define LIB_EXPORT
 #  endif

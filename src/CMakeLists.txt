@@ -67,7 +67,7 @@ OPTION(APTO_LIB_STATIC
 )
 IF(APTO_LIB_STATIC)
   ADD_LIBRARY(aptostatic STATIC ${APTO_CORE_SOURCES})
-  SET_TARGET_PROPERTIES(aptostatic PROPERTIES OUTPUT_NAME apto)
+  # NOTE: OUTPUT_NAME removed to avoid conflicts with aptoshared DLL import lib
   IF(NOT MSVC)
     TARGET_LINK_LIBRARIES(aptoshared pthread)
   ENDIF(NOT MSVC)
