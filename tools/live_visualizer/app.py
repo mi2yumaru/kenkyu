@@ -13,6 +13,7 @@ from pathlib import Path
 from collections import deque
 import matplotlib.pyplot as plt
 from typing import Optional, Dict, List
+import queue
 
 # ========================================
 # ページ設定
@@ -39,6 +40,7 @@ if "is_running" not in st.session_state:
     st.session_state.is_running = False
     st.session_state.process = None
     st.session_state.thread = None
+    st.session_state.data_queue = queue.Queue()  # スレッド間通信用キュー
     st.session_state.data_history = {
         "UD": deque(maxlen=MAX_HISTORY),
         "Gen": deque(maxlen=MAX_HISTORY),
@@ -90,11 +92,12 @@ def parse_avida_line(line: str) -> Optional[Dict]:
 
 
 # ========================================
-# Avida 実行関数
+# Avida 実行関数（バックグラウンドスレッド）
 # ========================================
 def run_avida_simulation():
     """
     Avida シミュレーションを実行し、標準出力をリアルタイム読み取り
+    ※ Streamlit UI は更新せず、キューにデータを蓄積するだけ
     """
     try:
         # プロセス起動
@@ -106,7 +109,6 @@ def run_avida_simulation():
             universal_newlines=True,  # テキストモード
             bufsize=1,  # 行バッファリング
         )
-        st.session_state.process = process
         
         # 標準出力を行ごとに読み取る
         for line in process.stdout:
@@ -122,27 +124,51 @@ def run_avida_simulation():
             # Avida 出力をパース
             data = parse_avida_line(line)
             if data:
-                # データを履歴に追加
-                st.session_state.data_history["UD"].append(data["UD"])
-                st.session_state.data_history["Gen"].append(data["Gen"])
-                st.session_state.data_history["Fit"].append(data["Fit"])
-                st.session_state.data_history["Orgs"].append(data["Orgs"])
-                
-                # 最新データを更新
-                st.session_state.latest_data = data
-                
-                # カウント増加
-                st.session_state.update_count += 1
+                # データをキューに追加（メインスレッドで処理）
+                st.session_state.data_queue.put(data)
         
         # プロセス終了を待つ
         process.wait()
         
     except Exception as e:
-        st.session_state.error_message = f"エラー: {str(e)}"
+        # エラーメッセージをキューに追加
+        st.session_state.data_queue.put({"error": str(e)})
     
     finally:
         st.session_state.is_running = False
-        st.session_state.process = None
+
+
+# ========================================
+# キューからデータを処理（メインスレッド）
+# ========================================
+def process_data_queue():
+    """
+    バックグラウンドスレッドから送られたデータを処理
+    """
+    updated = False
+    while not st.session_state.data_queue.empty():
+        item = st.session_state.data_queue.get()
+        
+        if "error" in item:
+            st.session_state.error_message = f"エラー: {item['error']}"
+            continue
+        
+        # 正常データの場合
+        data = item
+        # データを履歴に追加
+        st.session_state.data_history["UD"].append(data["UD"])
+        st.session_state.data_history["Gen"].append(data["Gen"])
+        st.session_state.data_history["Fit"].append(data["Fit"])
+        st.session_state.data_history["Orgs"].append(data["Orgs"])
+        
+        # 最新データを更新
+        st.session_state.latest_data = data
+        
+        # カウント増加
+        st.session_state.update_count += 1
+        updated = True
+    
+    return updated
 
 
 # ========================================
@@ -164,6 +190,9 @@ with col_start:
             }
             st.session_state.update_count = 0
             st.session_state.error_message = None
+            # キューをクリア
+            while not st.session_state.data_queue.empty():
+                st.session_state.data_queue.get()
             
             # 実行開始
             st.session_state.is_running = True
@@ -173,7 +202,6 @@ with col_start:
             )
             thread.start()
             st.session_state.thread = thread
-            st.rerun()
 
 with col_stop:
     if st.button("⏹ Stop Simulation", use_container_width=True, key="btn_stop"):
@@ -181,13 +209,20 @@ with col_stop:
             st.session_state.is_running = False
             if st.session_state.process:
                 st.session_state.process.terminate()
-            st.rerun()
 
 with col_status:
     if st.session_state.is_running:
         st.success("🟢 **Running**")
     else:
         st.info("🔴 **Stopped**")
+
+# ========================================
+# データ処理（毎回実行）
+# ========================================
+if st.session_state.is_running or not st.session_state.data_queue.empty():
+    if process_data_queue():
+        # データが更新されたら再描画
+        st.rerun()
 
 # エラーメッセージ表示
 if st.session_state.error_message:
