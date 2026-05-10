@@ -1,442 +1,440 @@
 #!/usr/bin/env python3
 """
 Avida Live Visualizer
-リアルタイムでAvida シミュレーションの出力をグラフ表示する最小構成
+リアルタイムでAvida シミュレーションの出力をグラフ表示する
+スレッド安全な設計：スレッドは queue に入れるだけ、メインはそれを処理
 """
 
 import streamlit as st
 import subprocess
 import threading
-import time
+import queue
 import re
-from pathlib import Path
 from collections import deque
 import matplotlib.pyplot as plt
-from typing import Optional, Dict, List
-import queue
+from datetime import datetime
 
 # ========================================
 # ページ設定
 # ========================================
-st.set_page_config(
-    page_title="Avida Live Visualizer",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
+st.set_page_config(page_title="Avida Live Visualizer", layout="wide")
 st.title("🧬 Avida Live Visualizer")
 
-# ========================================
-# 定数設定
-# ========================================
-AVIDA_EXE = Path(r"C:\avida\build\bin\Debug\avida.exe")
-AVIDA_WORK_DIR = Path(r"C:\avida\build\bin\Debug")
-MAX_HISTORY = 1000  # グラフに表示する最大データ点数
 
 # ========================================
-# Session State 初期化
+# Session State 初期化（メインスレッド開始時）
 # ========================================
-if "is_running" not in st.session_state:
-    st.session_state.is_running = False
-    st.session_state.process = None
-    st.session_state.thread = None
-    st.session_state.data_queue = queue.Queue()  # スレッド間通信用キュー
-    st.session_state.data_history = {
-        "UD": deque(maxlen=MAX_HISTORY),
-        "Gen": deque(maxlen=MAX_HISTORY),
-        "Fit": deque(maxlen=MAX_HISTORY),
-        "Orgs": deque(maxlen=MAX_HISTORY),
-    }
-    st.session_state.latest_data = {
-        "UD": 0,
-        "Gen": 0,
-        "Fit": 0.0,
-        "Orgs": 0,
-    }
-    st.session_state.update_count = 0
-    st.session_state.error_message = None
-    # デバッグ情報
-    st.session_state.debug_info = {
-        "process_started": False,
-        "last_10_lines": deque(maxlen=10),
-        "parse_success_count": 0,
-        "parse_fail_count": 0,
-        "last_parsed_data": None,
-        "last_raw_line": None,
-    }
+def initialize_session_state():
+    """Initialize all required session_state variables."""
+    if "data_queue" not in st.session_state:
+        st.session_state.data_queue = queue.Queue()
+    if "raw_lines" not in st.session_state:
+        st.session_state.raw_lines = deque(maxlen=100)
+    if "stderr_lines" not in st.session_state:
+        st.session_state.stderr_lines = deque(maxlen=20)
+    if "parsed_rows" not in st.session_state:
+        st.session_state.parsed_rows = deque(maxlen=1000)
+    if "parse_success" not in st.session_state:
+        st.session_state.parse_success = 0
+    if "parse_fail" not in st.session_state:
+        st.session_state.parse_fail = 0
+    if "last_parsed" not in st.session_state:
+        st.session_state.last_parsed = None
+    if "last_raw_line" not in st.session_state:
+        st.session_state.last_raw_line = ""
+    if "process_started" not in st.session_state:
+        st.session_state.process_started = False
+    if "running" not in st.session_state:
+        st.session_state.running = False
+    if "worker_thread" not in st.session_state:
+        st.session_state.worker_thread = None
+    if "process_pid" not in st.session_state:
+        st.session_state.process_pid = None
+    if "process_exit_code" not in st.session_state:
+        st.session_state.process_exit_code = None
+    if "stdout_lines_received" not in st.session_state:
+        st.session_state.stdout_lines_received = 0
+    if "queue_items_received" not in st.session_state:
+        st.session_state.queue_items_received = 0
+    if "avida_exe_path" not in st.session_state:
+        st.session_state.avida_exe_path = "C:\\avida\\build\\bin\\Debug\\avida.exe"
+    if "avida_cwd" not in st.session_state:
+        st.session_state.avida_cwd = "C:\\avida\\build\\bin\\Debug"
 
 
 # ========================================
 # パース関数
 # ========================================
-def parse_avida_line(line: str) -> Optional[Dict]:
+def parse_avida_line(line):
     """
-    Avida 出力行をパースする
+    Parse Avida output line format:
+    UD: 752   Gen: 57.83987   Fit: 0.2486994   Orgs: 3597
     
-    期待される形式: "UD: 752   Gen: 57.83987   Fit: 0.2486994   Orgs: 3597"
-    
-    Args:
-        line: Avida の出力行
-        
-    Returns:
-        {'UD': int, 'Gen': int, 'Fit': float, 'Orgs': int} または None
+    Returns dict with parsed values or None if parse fails.
     """
-    try:
-        # 正規表現でパース
-        pattern = r'UD:\s*(\d+)\s+Gen:\s*([\d.]+)\s+Fit:\s*([\d.]+)\s+Orgs:\s*(\d+)'
-        match = re.search(pattern, line.strip())
-        
-        if match:
+    pattern = r'UD:\s*([\d.]+)\s+Gen:\s*([\d.]+)\s+Fit:\s*([\d.]+)\s+Orgs:\s*([\d]+)'
+    match = re.search(pattern, line)
+    
+    if match:
+        try:
             return {
-                "UD": int(match.group(1)),
-                "Gen": int(float(match.group(2))),  # Gen は整数に変換
-                "Fit": float(match.group(3)),
-                "Orgs": int(match.group(4)),
+                "ud": float(match.group(1)),
+                "gen": float(match.group(2)),
+                "fit": float(match.group(3)),
+                "orgs": int(match.group(4))
             }
-        else:
+        except (ValueError, IndexError):
             return None
-    except (ValueError, IndexError, AttributeError):
-        return None
+    return None
+
+
 
 
 # ========================================
-# Avida 実行関数（バックグラウンドスレッド）
+# バックグラウンドスレッド関数
+# （Streamlit API を一切使用しない）
 # ========================================
-def run_avida_simulation():
+def run_avida_simulation(queue_obj):
     """
-    Avida シミュレーションを実行し、標準出力をリアルタイム読み取り
-    ※ Streamlit UI は更新せず、キューにデータを蓄積するだけ
+    Run Avida simulation and send data through queue.
+    This function runs in a background thread and MUST NOT touch st.session_state or st.* APIs.
     """
+    avida_exe = "C:\\avida\\build\\bin\\Debug\\avida.exe"
+    avida_cwd = "C:\\avida\\build\\bin\\Debug"
+    
     try:
-        # プロセス起動
+        # Signal: パス情報をキューに入れる
+        queue_obj.put({"type": "debug", "key": "avida_exe_path", "value": avida_exe})
+        queue_obj.put({"type": "debug", "key": "avida_cwd", "value": avida_cwd})
+        
+        # Start process with explicit cwd and stderr=PIPE
         process = subprocess.Popen(
-            [str(AVIDA_EXE)],
-            cwd=str(AVIDA_WORK_DIR),
+            [avida_exe],
+            cwd=avida_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True,  # テキストモード
-            bufsize=1,  # 行バッファリング
+            text=True,
+            bufsize=1
         )
         
-        # プロセス起動成功をマーク
-        st.session_state.debug_info["process_started"] = True
+        # Signal: プロセス起動情報をキューに入れる
+        queue_obj.put({"type": "debug", "key": "process_pid", "value": str(process.pid)})
+        queue_obj.put({"type": "status", "process_started": True})
         
-        # 標準出力を行ごとに読み取る
-        for line in process.stdout:
-            # 停止フラグをチェック
-            if not st.session_state.is_running:
-                process.terminate()
+        # スレッド内で stderr を読む関数
+        def read_stderr():
+            """Read stderr in a separate thread."""
+            while True:
+                err_line = process.stderr.readline()
+                if not err_line:
+                    break
+                err_line = err_line.strip()
+                if err_line:
+                    queue_obj.put({"type": "stderr", "line": err_line})
+        
+        # stderr 読取スレッドを起動
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+        
+        # Read stdout line by line
+        stdout_count = 0
+        queue_count = 0
+        
+        while True:
+            line = process.stdout.readline()
+            if not line:
                 break
             
             line = line.strip()
             if not line:
                 continue
             
-            # デバッグ: 直近10行を保持
-            st.session_state.debug_info["last_10_lines"].append(line)
-            st.session_state.debug_info["last_raw_line"] = line
+            stdout_count += 1
             
-            # Avida 出力をパース
-            data = parse_avida_line(line)
-            if data:
-                # パース成功
-                st.session_state.debug_info["parse_success_count"] += 1
-                st.session_state.debug_info["last_parsed_data"] = data
-                # データをキューに追加（メインスレッドで処理）
-                st.session_state.data_queue.put(data)
+            # Send raw line to queue
+            queue_obj.put({"type": "raw", "line": line})
+            queue_count += 1
+            
+            # Try to parse and send parsed data
+            parsed = parse_avida_line(line)
+            if parsed:
+                queue_obj.put({
+                    "type": "parsed",
+                    "ud": parsed["ud"],
+                    "gen": parsed["gen"],
+                    "fit": parsed["fit"],
+                    "orgs": parsed["orgs"]
+                })
+                queue_count += 1
             else:
-                # パース失敗
-                st.session_state.debug_info["parse_fail_count"] += 1
+                queue_obj.put({"type": "error", "message": f"Failed to parse: {line}"})
+                queue_count += 1
         
-        # プロセス終了を待つ
+        # Wait for process to finish
         process.wait()
+        exit_code = process.poll()
+        
+        # Signal: プロセス終了情報をキューに入れる
+        queue_obj.put({"type": "debug", "key": "process_exit_code", "value": str(exit_code)})
+        queue_obj.put({"type": "debug", "key": "stdout_lines_received", "value": str(stdout_count)})
+        queue_obj.put({"type": "debug", "key": "queue_items_sent", "value": str(queue_count)})
+        
+        # Ensure stderr thread finishes
+        stderr_thread.join(timeout=1.0)
+        
+        queue_obj.put({"type": "status", "process_ended": True})
         
     except Exception as e:
-        # エラーメッセージをキューに追加
-        st.session_state.data_queue.put({"error": str(e)})
-    
-    finally:
-        st.session_state.is_running = False
+        queue_obj.put({"type": "error", "message": f"Thread error: {str(e)}"})
+
+
 
 
 # ========================================
 # キューからデータを処理（メインスレッド）
 # ========================================
-def process_data_queue():
+def process_queue_data():
     """
-    バックグラウンドスレッドから送られたデータを処理
+    Process all available data from queue and update session_state.
+    This should be called frequently from the main thread.
     """
-    updated = False
-    while not st.session_state.data_queue.empty():
-        item = st.session_state.data_queue.get()
-        
-        if "error" in item:
-            st.session_state.error_message = f"エラー: {item['error']}"
-            continue
-        
-        # 正常データの場合
-        data = item
-        # データを履歴に追加
-        st.session_state.data_history["UD"].append(data["UD"])
-        st.session_state.data_history["Gen"].append(data["Gen"])
-        st.session_state.data_history["Fit"].append(data["Fit"])
-        st.session_state.data_history["Orgs"].append(data["Orgs"])
-        
-        # 最新データを更新
-        st.session_state.latest_data = data
-        
-        # カウント増加
-        st.session_state.update_count += 1
-        updated = True
+    queue_obj = st.session_state.data_queue
     
-    return updated
-
-
-# ========================================
-# UI: コントロール
-# ========================================
-st.subheader("🎮 Control Panel")
-
-col_start, col_stop, col_status = st.columns([1, 1, 2])
-
-with col_start:
-    if st.button("▶ Start Simulation", use_container_width=True, key="btn_start"):
-        if not st.session_state.is_running:
-            # リセット
-            st.session_state.data_history = {
-                "UD": deque(maxlen=MAX_HISTORY),
-                "Gen": deque(maxlen=MAX_HISTORY),
-                "Fit": deque(maxlen=MAX_HISTORY),
-                "Orgs": deque(maxlen=MAX_HISTORY),
-            }
-            st.session_state.update_count = 0
-            st.session_state.error_message = None
-            # デバッグ情報リセット
-            st.session_state.debug_info = {
-                "process_started": False,
-                "last_10_lines": deque(maxlen=10),
-                "parse_success_count": 0,
-                "parse_fail_count": 0,
-                "last_parsed_data": None,
-                "last_raw_line": None,
-            }
-            # キューをクリア
-            while not st.session_state.data_queue.empty():
-                st.session_state.data_queue.get()
+    while not queue_obj.empty():
+        try:
+            msg = queue_obj.get_nowait()
+            st.session_state.queue_items_received += 1
             
-            # 実行開始
-            st.session_state.is_running = True
-            thread = threading.Thread(
-                target=run_avida_simulation,
-                daemon=True,
-            )
-            thread.start()
-            st.session_state.thread = thread
+            if msg["type"] == "raw":
+                st.session_state.last_raw_line = msg["line"]
+                st.session_state.raw_lines.append(msg["line"])
+            
+            elif msg["type"] == "stderr":
+                st.session_state.stderr_lines.append(msg["line"])
+            
+            elif msg["type"] == "debug":
+                key = msg["key"]
+                value = msg["value"]
+                if key == "process_pid":
+                    st.session_state.process_pid = value
+                elif key == "process_exit_code":
+                    st.session_state.process_exit_code = value
+                elif key == "stdout_lines_received":
+                    st.session_state.stdout_lines_received = int(value)
+                elif key == "avida_exe_path":
+                    st.session_state.avida_exe_path = value
+                elif key == "avida_cwd":
+                    st.session_state.avida_cwd = value
+            
+            elif msg["type"] == "parsed":
+                st.session_state.parse_success += 1
+                parsed_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "ud": msg["ud"],
+                    "gen": msg["gen"],
+                    "fit": msg["fit"],
+                    "orgs": msg["orgs"]
+                }
+                st.session_state.parsed_rows.append(parsed_data)
+                st.session_state.last_parsed = parsed_data
+            
+            elif msg["type"] == "error":
+                st.session_state.parse_fail += 1
+            
+            elif msg["type"] == "status":
+                if msg.get("process_started"):
+                    st.session_state.process_started = True
+                if msg.get("process_ended"):
+                    st.session_state.running = False
+        
+        except queue.Empty:
+            break
 
-with col_stop:
-    if st.button("⏹ Stop Simulation", use_container_width=True, key="btn_stop"):
-        if st.session_state.is_running:
-            st.session_state.is_running = False
-            if st.session_state.process:
-                st.session_state.process.terminate()
 
-with col_status:
-    if st.session_state.is_running:
-        st.success("🟢 **Running**")
-    else:
-        st.info("🔴 **Stopped**")
+
 
 # ========================================
-# データ処理（毎回実行）
+# コントロール関数
 # ========================================
-if st.session_state.is_running or not st.session_state.data_queue.empty():
-    if process_data_queue():
-        # データが更新されたら再描画
-        st.rerun()
+def start_simulation():
+    """Start the Avida simulation in a background thread."""
+    if st.session_state.running:
+        st.warning("Simulation already running!")
+        return
+    
+    st.session_state.running = True
+    st.session_state.parse_success = 0
+    st.session_state.parse_fail = 0
+    st.session_state.stdout_lines_received = 0
+    st.session_state.queue_items_received = 0
+    st.session_state.process_pid = None
+    st.session_state.process_exit_code = None
+    st.session_state.raw_lines.clear()
+    st.session_state.stderr_lines.clear()
+    st.session_state.parsed_rows.clear()
+    st.session_state.process_started = False
+    st.session_state.last_raw_line = ""
+    
+    # Create and start worker thread
+    thread = threading.Thread(
+        target=run_avida_simulation,
+        args=(st.session_state.data_queue,),
+        daemon=True
+    )
+    st.session_state.worker_thread = thread
+    thread.start()
 
-# エラーメッセージ表示
-if st.session_state.error_message:
-    st.error(st.session_state.error_message)
+
+def stop_simulation():
+    """Stop the Avida simulation."""
+    st.session_state.running = False
+
+
+
 
 # ========================================
-# UI: 統計情報
+# ページ実行
 # ========================================
-if st.session_state.update_count > 0 or st.session_state.debug_info["parse_success_count"] > 0:
-    st.divider()
-    st.subheader("📊 Current Statistics")
+
+# Initialize session state (main thread)
+initialize_session_state()
+
+# Control panel
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("▶ Start", key="start_btn", use_container_width=True):
+        start_simulation()
+
+with col2:
+    if st.button("⏹ Stop", key="stop_btn", use_container_width=True):
+        stop_simulation()
+
+with col3:
+    if st.button("🔄 Clear", key="clear_btn", use_container_width=True):
+        st.session_state.raw_lines.clear()
+        st.session_state.stderr_lines.clear()
+        st.session_state.parsed_rows.clear()
+        st.session_state.parse_success = 0
+        st.session_state.parse_fail = 0
+        st.session_state.last_parsed = None
+        st.session_state.last_raw_line = ""
+        st.session_state.process_pid = None
+        st.session_state.process_exit_code = None
+
+# Process queue data (main thread operation)
+process_queue_data()
+
+# Debug info panel
+with st.expander("🔧 Debug Information", expanded=True):
+    st.subheader("Process Information")
     
-    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
-    
-    with metric_col1:
-        st.metric(
-            "Updates",
-            st.session_state.update_count,
-        )
-    
-    with metric_col2:
-        st.metric(
-            "Latest UD",
-            st.session_state.latest_data["UD"],
-        )
-    
-    with metric_col3:
-        st.metric(
-            "Latest Gen",
-            st.session_state.latest_data["Gen"],
-        )
-    
-    with metric_col4:
-        st.metric(
-            "Latest Fit",
-            f"{st.session_state.latest_data['Fit']:.4f}",
-        )
-    
-    with metric_col5:
-        st.metric(
-            "Latest Orgs",
-            st.session_state.latest_data["Orgs"],
-        )
-    
-    # ========================================
-    # デバッグ情報表示
-    # ========================================
-    st.divider()
-    st.subheader("🐛 Debug Information")
-    
-    debug_col1, debug_col2, debug_col3 = st.columns(3)
+    debug_col1, debug_col2, debug_col3, debug_col4 = st.columns(4)
     
     with debug_col1:
-        st.metric("Process Started", "Yes" if st.session_state.debug_info["process_started"] else "No")
-        st.metric("Parse Success", st.session_state.debug_info["parse_success_count"])
-        st.metric("Parse Fail", st.session_state.debug_info["parse_fail_count"])
+        st.metric("Process Running", "Yes" if st.session_state.running else "No")
+        st.metric("Process Started", "Yes" if st.session_state.process_started else "No")
     
     with debug_col2:
-        st.write("**Last 10 Raw Lines:**")
-        for i, line in enumerate(st.session_state.debug_info["last_10_lines"]):
-            st.code(f"{i+1}: {line}", language=None)
+        st.metric("Process PID", st.session_state.process_pid or "N/A")
+        st.metric("Exit Code", st.session_state.process_exit_code or "N/A")
     
     with debug_col3:
-        st.write("**Last Parsed Data:**")
-        if st.session_state.debug_info["last_parsed_data"]:
-            st.json(st.session_state.debug_info["last_parsed_data"])
-        else:
-            st.write("None")
-        
-        st.write("**Last Raw Line:**")
-        if st.session_state.debug_info["last_raw_line"]:
-            st.code(st.session_state.debug_info["last_raw_line"], language=None)
-        else:
-            st.write("None")
+        st.metric("stdout Lines Received", st.session_state.stdout_lines_received)
+        st.metric("Queue Items Received", st.session_state.queue_items_received)
     
-    # ========================================
-    # グラフ表示
-    # ========================================
+    with debug_col4:
+        st.metric("Parse Success", st.session_state.parse_success)
+        st.metric("Parse Fail", st.session_state.parse_fail)
+    
+    st.divider()
+    
+    st.subheader("Paths")
+    st.code(f"avida_exe_path: {st.session_state.avida_exe_path}")
+    st.code(f"cwd: {st.session_state.avida_cwd}")
+    
+    st.divider()
+    
+    st.subheader("Last Raw Line")
+    st.code(st.session_state.last_raw_line or "(no data)")
+    
+    st.subheader("Recent Raw Lines (Last 20)")
+    if st.session_state.raw_lines:
+        for i, line in enumerate(list(st.session_state.raw_lines)[-20:], 1):
+            st.code(f"{i}: {line}", language=None)
+    else:
+        st.info("No lines yet")
+    
+    st.divider()
+    
+    st.subheader("Stderr Lines (Last 20)")
+    if st.session_state.stderr_lines:
+        for i, line in enumerate(list(st.session_state.stderr_lines)[-20:], 1):
+            st.warning(f"{i}: {line}")
+    else:
+        st.info("No stderr output")
+    
+    st.divider()
+    
+    st.subheader("Last Parsed Data")
+    if st.session_state.last_parsed:
+        st.json(st.session_state.last_parsed)
+    else:
+        st.info("No parsed data yet")
+
+
+
+# Data display section
+if st.session_state.parsed_rows:
     st.divider()
     st.subheader("📈 Real-time Graphs")
     
-    # x軸（データポイント番号）
-    x_data = list(range(len(st.session_state.data_history["Gen"])))
+    # Convert deque to list for plotting
+    data_list = list(st.session_state.parsed_rows)
     
-    # 図作成（2x2 レイアウト）
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Avida Simulation Data", fontsize=14, fontweight="bold")
+    # Extract columns for graphing
+    indices = list(range(len(data_list)))
+    gen_values = [row["gen"] for row in data_list]
+    fit_values = [row["fit"] for row in data_list]
+    orgs_values = [row["orgs"] for row in data_list]
     
-    # [0,0] Gen (Generation)
-    axes[0, 0].plot(
-        x_data,
-        list(st.session_state.data_history["Gen"]),
-        color="blue",
-        linewidth=1.5,
-        label="Generation",
-    )
-    axes[0, 0].set_title("Generation (Gen)", fontweight="bold")
-    axes[0, 0].set_xlabel("Data Point")
-    axes[0, 0].set_ylabel("Gen")
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].legend()
+    # Create matplotlib figure with subplots
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
-    # [0,1] Fit (Fitness)
-    axes[0, 1].plot(
-        x_data,
-        list(st.session_state.data_history["Fit"]),
-        color="green",
-        linewidth=1.5,
-        label="Fitness",
-    )
-    axes[0, 1].set_title("Fitness (Fit)", fontweight="bold")
-    axes[0, 1].set_xlabel("Data Point")
-    axes[0, 1].set_ylabel("Fit")
-    axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].legend()
+    # Gen graph
+    axes[0].plot(indices, gen_values, label="Generation", color="blue", linewidth=2)
+    axes[0].set_ylabel("Generation")
+    axes[0].set_title("Generation Over Time")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
     
-    # [1,0] Orgs (Population)
-    axes[1, 0].plot(
-        x_data,
-        list(st.session_state.data_history["Orgs"]),
-        color="red",
-        linewidth=1.5,
-        label="Population",
-    )
-    axes[1, 0].set_title("Population Size (Orgs)", fontweight="bold")
-    axes[1, 0].set_xlabel("Data Point")
-    axes[1, 0].set_ylabel("Orgs")
-    axes[1, 0].grid(True, alpha=0.3)
-    axes[1, 0].legend()
+    # Fit graph
+    axes[1].plot(indices, fit_values, label="Fitness", color="green", linewidth=2)
+    axes[1].set_ylabel("Fitness")
+    axes[1].set_title("Fitness Over Time")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
     
-    # [1,1] UD (Update)
-    axes[1, 1].plot(
-        x_data,
-        list(st.session_state.data_history["UD"]),
-        color="purple",
-        linewidth=1.5,
-        label="Update",
-    )
-    axes[1, 1].set_title("Update (UD)", fontweight="bold")
-    axes[1, 1].set_xlabel("Data Point")
-    axes[1, 1].set_ylabel("UD")
-    axes[1, 1].grid(True, alpha=0.3)
-    axes[1, 1].legend()
+    # Orgs graph
+    axes[2].plot(indices, orgs_values, label="Organisms", color="red", linewidth=2)
+    axes[2].set_ylabel("Organisms")
+    axes[2].set_xlabel("Data Point")
+    axes[2].set_title("Organisms Over Time")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend()
     
     plt.tight_layout()
     st.pyplot(fig)
-
-else:
-    st.info(
-        "👈 Click **'Start Simulation'** button to begin collecting data and display graphs."
-    )
     
-    # デバッグ情報表示（データがなくても）
-    if st.session_state.debug_info["parse_success_count"] > 0 or st.session_state.debug_info["parse_fail_count"] > 0:
-        st.divider()
-        st.subheader("🐛 Debug Information (No Graph Data Yet)")
-        
-        debug_col1, debug_col2 = st.columns(2)
-        
-        with debug_col1:
-            st.metric("Process Started", "Yes" if st.session_state.debug_info["process_started"] else "No")
-            st.metric("Parse Success", st.session_state.debug_info["parse_success_count"])
-            st.metric("Parse Fail", st.session_state.debug_info["parse_fail_count"])
-        
-        with debug_col2:
-            st.write("**Last Raw Line:**")
-            if st.session_state.debug_info["last_raw_line"]:
-                st.code(st.session_state.debug_info["last_raw_line"], language=None)
-            else:
-                st.write("None")
+    # Data table
+    st.subheader("📋 Data Table")
+    st.dataframe(
+        list(st.session_state.parsed_rows),
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("👈 Waiting for data... Click 'Start' to begin simulation.")
 
-# ========================================
-# サイドバー：情報
-# ========================================
-st.sidebar.subheader("ℹ️ Information")
-st.sidebar.write(f"**Avida Executable:** {AVIDA_EXE}")
-st.sidebar.write(f"**Working Directory:** {AVIDA_WORK_DIR}")
-st.sidebar.write(f"**Max History Points:** {MAX_HISTORY}")
-
-st.sidebar.divider()
-st.sidebar.write("""
-### How to Use
-1. Click **Start Simulation** to begin
-2. Watch real-time data displayed in the graphs
-3. Metrics update as new data arrives
-4. Click **Stop Simulation** to end
-""")
+# Auto-refresh loop
+if st.session_state.running:
+    st.rerun()
