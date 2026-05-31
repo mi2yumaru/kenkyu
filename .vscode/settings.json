@@ -4,5 +4,7 @@
     "-DAVD_CMDLINE=ON",
     "-DAVD_UNIT_TESTS=OFF",
     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-  ]
+  ],
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
